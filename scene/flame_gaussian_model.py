@@ -5,7 +5,7 @@
 # related documentation without an express license agreement from Toyota Motor Europe NV/SA 
 # is strictly prohibited.
 #
-
+import os
 from pathlib import Path
 import numpy as np
 import torch
@@ -62,6 +62,7 @@ class FlameGaussianModel(GaussianModel):
         gs_scaling_np = gs_scaling_uv.detach().cpu().numpy()
         gs_xyz_np = gs_xyz_uv.detach().cpu().numpy()
 
+        os.makedirs("./output/", exist_ok=True)
         np.savez_compressed(f"./output/gs_attrs_uv_300X300_{iter}.npz", gs_features_uv=gs_features_np,
                             gs_opacity_uv=gs_opacity_np,rot_delta_uv=gs_rotation_np,
                             local_scaling_uv=gs_scaling_np,local_position_uv=gs_xyz_np)
