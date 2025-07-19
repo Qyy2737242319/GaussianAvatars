@@ -8,11 +8,11 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import torch
 from torch.utils.data import DataLoader
 from scene import Scene
-import os
 from tqdm import tqdm
 from os import makedirs
 import concurrent.futures
@@ -67,31 +67,33 @@ def render_set(dataset : ModelParams, name, iteration, views, gaussians, pipelin
     max_threads = multiprocessing.cpu_count()
     print('Max threads: ', max_threads)
     worker_args = []
-    for idx, view in enumerate(tqdm(views_loader, desc="Rendering progress")):
-        if gaussians.binding != None:
-            gaussians.select_mesh_by_timestep(view.timestep)
-        rendering = render(view, gaussians, pipeline, background)["render"]
-        gt = view.original_image[0:3, :, :]
-        if render_mesh:
-            out_dict = mesh_renderer.render_from_camera(gaussians.verts, gaussians.faces, view)
-            rgba_mesh = out_dict['rgba'].squeeze(0).permute(2, 0, 1)  # (C, W, H)
-            rgb_mesh = rgba_mesh[:3, :, :]
-            alpha_mesh = rgba_mesh[3:, :, :]
-            mesh_opacity = 0.5
-            rendering_mesh = rgb_mesh * alpha_mesh * mesh_opacity  + gt.to(rgb_mesh) * (alpha_mesh * (1 - mesh_opacity) + (1 - alpha_mesh))
-
-        path2data = {}
-        path2data[Path(render_path) / f'{idx:05d}.png'] = rendering
-        path2data[Path(gts_path) / f'{idx:05d}.png'] = gt
-        if render_mesh:
-            path2data[Path(render_mesh_path) / f'{idx:05d}.png'] = rendering_mesh
-        worker_args.append([path2data])
-
-        if len(worker_args) == max_threads or idx == len(views_loader)-1:
-            with concurrent.futures.ThreadPoolExecutor(max_threads) as executor:
-                futures = [executor.submit(write_data, *args) for args in worker_args]
-                concurrent.futures.wait(futures)
-            worker_args = []
+    gaussians.get_gs_attributes_uv(iteration)
+    # for idx, view in enumerate(tqdm(views_loader, desc="Rendering progress")):
+    #     if gaussians.binding != None:
+    #         gaussians.select_mesh_by_timestep(view.timestep)
+    #
+    #     rendering = render(view, gaussians, pipeline, background)["render"]
+    #     gt = view.original_image[0:3, :, :]
+    #     if render_mesh:
+    #         out_dict = mesh_renderer.render_from_camera(gaussians.verts, gaussians.faces, view)
+    #         rgba_mesh = out_dict['rgba'].squeeze(0).permute(2, 0, 1)  # (C, W, H)
+    #         rgb_mesh = rgba_mesh[:3, :, :]
+    #         alpha_mesh = rgba_mesh[3:, :, :]
+    #         mesh_opacity = 0.5
+    #         rendering_mesh = rgb_mesh * alpha_mesh * mesh_opacity  + gt.to(rgb_mesh) * (alpha_mesh * (1 - mesh_opacity) + (1 - alpha_mesh))
+    #
+    #     path2data = {}
+    #     path2data[Path(render_path) / f'{idx:05d}.png'] = rendering
+    #     path2data[Path(gts_path) / f'{idx:05d}.png'] = gt
+    #     if render_mesh:
+    #         path2data[Path(render_mesh_path) / f'{idx:05d}.png'] = rendering_mesh
+    #     worker_args.append([path2data])
+    #
+    #     if len(worker_args) == max_threads or idx == len(views_loader)-1:
+    #         with concurrent.futures.ThreadPoolExecutor(max_threads) as executor:
+    #             futures = [executor.submit(write_data, *args) for args in worker_args]
+    #             concurrent.futures.wait(futures)
+    #         worker_args = []
     
     try:
         os.system(f"ffmpeg -y -framerate 25 -f image2 -pattern_type glob -i '{render_path}/*.png' -pix_fmt yuv420p {iter_path}/renders.mp4")
