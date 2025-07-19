@@ -11,12 +11,12 @@ import numpy as np
 import torch
 # from vht.model.flame import FlameHead
 from flame_model.flame import FlameHead
-
+from utils.general_utils import Pytorch3dRasterizer, face_vertices_gen
 from .gaussian_model import GaussianModel
 from utils.graphics_utils import compute_face_orientation
 # from pytorch3d.transforms import matrix_to_quaternion
 from roma import rotmat_to_unitquat, quat_xyzw_to_wxyz
-
+from PIL import Image
 
 class FlameGaussianModel(GaussianModel):
     def __init__(self, sh_degree : int, disable_flame_static_offset=False, not_finetune_flame_params=False, n_shape=300, n_expr=100):
@@ -34,11 +34,79 @@ class FlameGaussianModel(GaussianModel):
         ).cuda()
         self.flame_param = None
         self.flame_param_orig = None
-
+        self.mask_index = None
+        self.uv_size = 300
+        self.initial_binding_infor(self.uv_size, 1)
         # binding is initialized once the mesh topology is known
-        if self.binding is None:
-            self.binding = torch.arange(len(self.flame_model.faces)).cuda()
-            self.binding_counter = torch.ones(len(self.flame_model.faces), dtype=torch.int32).cuda()
+        # if self.binding is None:
+        #     self.binding = torch.arange(len(self.flame_model.faces)).cuda()
+        #     self.binding_counter = torch.ones(len(self.flame_model.faces), dtype=torch.int32).cuda()
+
+    def get_gs_attributes_uv(self,iter):
+
+        gs_features_uv = torch.zeros((self.uv_size,self.uv_size, 3),dtype=torch.float32).cuda()
+        gs_opacity_uv = torch.zeros((self.uv_size, self.uv_size, 1),dtype=torch.float32).cuda()
+        gs_rotation_uv = torch.zeros((self.uv_size, self.uv_size, 4),dtype=torch.float32).cuda()
+        gs_scaling_uv = torch.zeros((self.uv_size, self.uv_size, 3),dtype=torch.float32).cuda()
+        gs_xyz_uv = torch.zeros(( self.uv_size, self.uv_size, 3),dtype=torch.float32).cuda()
+        # test = gs_features_uv[self.mask_index[...,0],self.mask_index[...,1],:]
+        gs_features_uv[self.mask_index[...,0],self.mask_index[...,1],:] = self._features_dc.squeeze()
+        gs_opacity_uv[self.mask_index[...,0],self.mask_index[...,1],:] = self._opacity
+        gs_rotation_uv[self.mask_index[...,0],self.mask_index[...,1],:] = self._rotation
+        gs_scaling_uv[self.mask_index[...,0],self.mask_index[...,1],:] = self._scaling
+        gs_xyz_uv[self.mask_index[...,0],self.mask_index[...,1],:] = self._xyz
+
+        gs_features_np = gs_features_uv.detach().cpu().numpy()
+        gs_opacity_np = gs_opacity_uv.detach().cpu().numpy()
+        gs_rotation_np = gs_rotation_uv.detach().cpu().numpy()
+        gs_scaling_np = gs_scaling_uv.detach().cpu().numpy()
+        gs_xyz_np = gs_xyz_uv.detach().cpu().numpy()
+
+        np.savez_compressed(f"./output/gs_attrs_uv_300X300_{iter}.npz", gs_features_uv=gs_features_np,
+                            gs_opacity_uv=gs_opacity_np,rot_delta_uv=gs_rotation_np,
+                            local_scaling_uv=gs_scaling_np,local_position_uv=gs_xyz_np)
+
+        test_image = (gs_features_uv*255).detach().cpu().numpy().astype(np.uint8)
+        img = Image.fromarray(test_image)
+        img.save(f"./output/test_{iter}.png")
+
+
+    def initial_binding_infor(self, uv_size, batch_size):
+        uv_rasterizer = Pytorch3dRasterizer(uv_size)
+        face_vertices_shape = face_vertices_gen(self.flame_model.v_template.expand(batch_size, -1, -1),
+                                                self.flame_model.faces.expand(batch_size, -1, -1))
+        verts_uvs = self.flame_model.verts_uvs
+        verts_uvs = verts_uvs * 2 - 1
+        verts_uvs[..., 1] = - verts_uvs[..., 1]
+        verts_uvs = verts_uvs[None]
+        verts_uvs = torch.cat([verts_uvs, verts_uvs[:, :, 0:1] * 0. + 1.], -1)
+        rast_out, pix_to_face, bary_coords = uv_rasterizer(verts_uvs.expand(batch_size, -1, -1),
+                                                           self.flame_model.textures_idx.expand(batch_size, -1, -1),
+                                                           face_vertices_shape)
+        uvmask = rast_out[:, -1].unsqueeze(1)
+        uvmask_flaten = uvmask[0].view(uvmask.shape[1], -1).permute(1, 0).squeeze(1)  # batch=1
+        uvmask_flaten_idx = (uvmask_flaten[:] > 0)
+
+        pix_to_face_flaten = pix_to_face[0].clone().view(-1)  # batch=1
+        self.mask_index =  torch.nonzero(uvmask_flaten_idx.reshape(self.uv_size, self.uv_size))
+        self.binding = pix_to_face_flaten[uvmask_flaten_idx]  # pix to face idx
+        # self.pix_to_v_idx = self.flame_model.faces.expand(batch_size, -1, -1)[0, self.binding, :] # pix to vert idx
+
+        uv_vertices_shape = rast_out[:, :3]
+        uv_vertices_shape_flaten = uv_vertices_shape[0].view(uv_vertices_shape.shape[1], -1).permute(1,
+                                                                                                     0)  # batch=1
+        uv_vertices_shape = uv_vertices_shape_flaten[uvmask_flaten_idx].unsqueeze(0)
+
+        # xyz_data = uv_vertices_shape[0].cpu().detach().numpy()
+
+        # # 保存为 .xyz 文件
+        # with open("output.xyz", "w") as file:
+        #     for point in xyz_data:
+        #         # 写入每行的 x, y, z 坐标
+        #         file.write(f"{point[0]} {point[1]} {point[2]}\n")
+
+        # self.cano_vertices_xyz = uv_vertices_shape[0] # for cano init
+        self.gs_num = uv_vertices_shape.shape[1]
 
     def load_meshes(self, train_meshes, test_meshes, tgt_train_meshes, tgt_test_meshes):
         if self.flame_param is None:
@@ -242,19 +310,12 @@ class FlameGaussianModel(GaussianModel):
             flame_param = np.load(str(motion_path))
             flame_param = {k: torch.from_numpy(v).cuda() for k, v in flame_param.items() if v.dtype == np.float32}
 
-            self.flame_param = {
-                # keep the static parameters
-                'shape': self.flame_param['shape'],
-                'static_offset': self.flame_param['static_offset'],
-                # update the dynamic parameters
-                'translation': flame_param['translation'],
-                'rotation': flame_param['rotation'],
-                'neck_pose': flame_param['neck_pose'],
-                'jaw_pose': flame_param['jaw_pose'],
-                'eyes_pose': flame_param['eyes_pose'],
-                'expr': flame_param['expr'],
-                'dynamic_offset': flame_param['dynamic_offset'],
-            }
+            self.flame_param['translation'] = flame_param['translation']
+            self.flame_param['rotation'] = flame_param['rotation']
+            self.flame_param['neck_pose'] = flame_param['neck_pose']
+            self.flame_param['jaw_pose'] = flame_param['jaw_pose']
+            self.flame_param['eyes_pose'] = flame_param['eyes_pose']
+            self.flame_param['expr'] = flame_param['expr']
             self.num_timesteps = self.flame_param['expr'].shape[0]  # required by viewers
         
         if 'disable_fid' in kwargs and len(kwargs['disable_fid']) > 0:
